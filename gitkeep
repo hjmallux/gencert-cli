@@ -1,0 +1,64 @@
+#!/bin/bash
+## --------------------------------------------------
+## Filename:        gitkeep
+## Revision:        latest stable
+## Author:          Mallux
+## E-mail:          hj.mallux@gmail.com
+## Blog:            blog.mallux.me
+## Description:
+## --------------------------------------------------
+## Copyright © 2014-2019 Mallux
+
+WORK_DIR="./"
+
+usage() {
+    echo "Usage: ${BASH_SOURCE##*/} <Options>"
+    echo
+    echo "Add an empty directory to a Git repository."
+    echo
+    echo "Options:"
+    echo -e '  -e, --empty      \e[25G To find empty directory.'
+    echo -e '  -c, --create     \e[25G Under the empty directory to create ".gitkeep" file.'
+    echo
+    exit 0
+}
+
+[ $# -eq 0 ] && usage
+
+__do_add_ignore_items() {
+    cat >>${WORK_DIR}/.gitignore<<-EOF
+## ignore itmes
+#.gitignore
+*.retry
+!*/.gitkeep
+templates/
+#certs/
+EOF
+}
+
+__do_add_gitkeep_file() {
+    [ -z "$*" ] && args="$*" || ( rm -rf .gitignore && __do_add_ignore_items )
+
+    arg1='\( -type d -empty \)'
+    arg2='-and \( -not -regex ./\.git.* \)'
+
+    eval find ${WORK_DIR} $arg1 $arg2 $args
+}
+
+while [ $# -gt 0 ] ; do
+    case "$1" in
+        -e | --empty)
+            __do_add_gitkeep_file
+            ;;
+        -c | --create)
+            args='-exec touch {}/.gitkeep \;'
+            __do_add_gitkeep_file $args
+            ;;
+        *)
+            usage
+            ;;
+    esac
+    shift
+done
+
+exit 0

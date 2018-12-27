@@ -1,0 +1,643 @@
+#!/usr/bin/env bash
+## --------------------------------------------------
+## File Name:       gencert-cli
+## Revision:        latest stable
+## Author:          Mallux
+## E-Mail:          hj.mallux@gmail.com
+## Blog:            blog.mallux.me
+## Description:
+## --------------------------------------------------
+## Copyright © 2014-2019 Mallux
+
+## -x: Debug mode
+## -e: exit the script if any statement returns a non-true return value
+set -e #-x
+
+cmd=${BASH_SOURCE##*/} ; work_dir=$(pwd) ; tmp_dir="/tmp/$cmd/$$" ; mkdir -p ${tmp_dir}
+
+## Exit
+trap "__do_clean_tmpdir" EXIT
+
+__do_clean_tmpdir() {
+    rm -rf ${tmp_dir}
+}
+
+## ------ 默认，环境变量声明 ------
+
+## certificate templates and cfssl tools dir
+if [ x"${work_dir##*/}" == x"cli" ] ; then
+    certs_template_dir=${work_dir}/../templates
+    cfssl_cmd=${work_dir}/cfssl
+    cfssljson_cmd=${work_dir}/cfssljson
+else
+    certs_template_dir=${work_dir}/templates
+    cfssl_cmd=${work_dir}/cli/cfssl
+    cfssljson_cmd=${work_dir}/cli/cfssljson
+fi
+
+#mkdir -p ${certs_template_dir}
+
+## certificate config and csr template
+certs_config_template=${certs_template_dir}/conf.json.j2
+certs_csr_template=${certs_template_dir}/csr.json.j2
+
+## ------ 命令使用帮助信息，脚本输入参数 ------
+
+## usage
+usage() {
+    echo "Usage: $cmd [options] <command> [args...]"
+    echo
+    echo "OpenSSL command line management tool"
+    echo
+    echo -e "Commands:"
+    echo -e "   gentmpl                 \e[30G Generate default configurations that can be used as a template."
+    echo -e "   gencert                 \e[30G Generate a private key and signed certificate."
+    echo -e "   certinfo                \e[30G Output certinfo about the given cert."
+    echo
+    exit 1
+}
+
+## ------ 过滤命令参数列表 ------
+
+__do_retrieve_invalid_args() {
+    set -- $1 ${2:-nil}
+
+    if [ x"$1" == x"unknown" ] ; then
+        echo -e "\e[0;33;1mFatal:\e[0m $cmd: unrecognized optios -- $1" ; exit 1
+
+    else
+        if [ x"${2:0:1}" == x'-' ] ; then
+            echo -e "\e[0;33;1mFatal:\e[0m $cmd: option requires an argument -- $1" ; exit 1
+
+        else
+            ## invalid argument
+            case "$1" in
+                days)
+                    ## not int
+                    [ ! $(expr $days + 0 2>/dev/null) ] && {
+                        echo -e "\e[0;33;1mFatal:\e[0m $cmd: option ( $1 ) requires a valid argument -- $2" ; exit 1
+                    }
+                    ;;
+                type|\
+                newcert|\
+                profile|\
+                subject|\
+                hosts)
+                    [ x"$2" == x"nil" ] && {
+                        echo -e "\e[0;33;1mFatal:\e[0m $cmd: option requires an argument -- $1" ; exit 1
+                    }
+                    ;;
+            esac
+        fi
+    fi
+
+    return 0
+}
+
+## Retrieve invalid MustBeSet args
+__do_retrieve_invalid_mustbeset_args() {
+    case "$1" in
+        global)
+            :
+            ;;
+        gencert)
+            case "$2" in
+                global)
+                    [ -z "$interface" ] && __do_retrieve_invalid_args i $interface
+                    [ -z "$newcert" ] && __do_retrieve_invalid_args newcert $newcert
+                    ;;
+                custom)
+                    [ -z "$profile" ] && __do_retrieve_invalid_args profile $profile
+                    [ -z "$subject" ] && __do_retrieve_invalid_args subject ${certs_subject}
+                    ;;
+                hosts)
+                    [ -z "$hosts" ] && __do_retrieve_invalid_args hosts $hosts
+                    ;;
+            esac
+            ;;
+    esac
+
+    return 0
+}
+
+## ------ Openssl CLI commamd ------
+
+## generate config template
+__do_openssl_gencert_config_template() {
+    cat > ${certs_config_template} <<-EOF
+	{
+	  "signing": {
+	    "default": {
+	      "expiry": "87600h"
+	    },
+	    "profiles": {
+	      "kubernetes": {
+	        "expiry": "{{ certs_valid_hours }}",
+	        "usages": [
+	          "signing",
+	          "key encipherment",
+	          "server auth",
+	          "client auth"
+	        ]
+	      },
+	      "server": {
+	        "expiry": "{{ certs_valid_hours }}",
+	        "usages": [
+	          "signing",
+	          "key encipherment",
+	          "server auth"
+	        ]
+	      },
+	      "client": {
+	        "expiry": "{{ certs_valid_hours }}",
+	        "usages": [
+	          "signing",
+	          "key encipherment",
+	          "client auth"
+	        ]
+	      },
+	      "peer": {
+	        "expiry": "{{ certs_valid_hours }}",
+	        "usages": [
+	          "signing",
+	          "key encipherment",
+	          "server auth",
+	          "client auth"
+	        ]
+	      }
+	    }
+	  }
+	}
+	EOF
+
+    [ $? -eq 0 ] && echo -e "[\e[0;37;1m DONE \e[0m] Please see the \"${certs_config_template}\" file."
+    return 0
+}
+
+## generate config template
+__do_openssl_gencert_csr_template() {
+    cat > ${certs_template_dir}/csr.json.j2 <<-EOF
+	{
+	  "CN": "{{ common_name }}",
+	  "hosts": [ "{{ alternative_name }}" ],
+	  "key": {
+	    "algo": "rsa",
+	    "size": 2048
+	  },
+	  "names": [
+	    {
+	      "C": "{{ country }}",
+	      "ST": "{{ state }}",
+	      "L": "{{ city }}",
+	      "O": "{{ organization }}",
+	      "OU": "{{ organization_unit }}"
+	    }
+	  ],
+	  "ca": {
+	    "expiry": "175200h"
+	  }
+	}
+	EOF
+
+    [ $? -eq 0 ] && echo -e "[\e[0;37;1m DONE \e[0m] Please see the \"${certs_csr_template}\" file."
+    return 0
+}
+
+## gentmpl
+__do_openssl_gentmpl_cmd() {
+    gentmpl_usage() {
+        echo "Usage: $cmd ${subcmd} [options]"
+        echo "       $cmd ${subcmd} -h|--help"
+        echo
+        echo "Generate default configurations that can be used as a template"
+        echo
+        echo -e "Options:"
+        echo -e "   --type                  \e[30G Available: config and csr"
+        echo
+        exit 1
+    }
+
+    set -- $@ ; [ $# == 0 ] && gentmpl_usage
+    local OPTARGS
+
+    while test $# -gt 0 ; do
+        case "$1" in
+            -h|--help|help)
+                gentmpl_usage
+                ;;
+            --type)
+                shift ; type=$1 ; __do_retrieve_invalid_args type $type
+                ;;
+            *)
+                OPTARGS="$OPTARGS $1"
+                ;;
+        esac
+        shift
+    done
+
+    set -- $OPTARGS ; test $# -gt 0 && gentmpl_usage
+
+    mkdir -p ${certs_template_dir}
+
+    case "${type}" in
+        config)     __do_openssl_gencert_config_template ;;
+        csr)        __do_openssl_gencert_csr_template ;;
+	esac
+
+    return 0
+}
+
+## gencert
+__do_openssl_gencert_cmd() {
+    gencert_usage() {
+        echo "Usage: $cmd ${subcmd} [options]"
+        echo "       $cmd ${subcmd} -h|--help"
+        echo
+        echo "generate a new key and signed certificate"
+        echo
+        echo -e "Options:"
+        echo -e "   -i <interface>          \e[30G The name of the interface,"
+        echo -e "                           \e[30G and use the IP address to set alternative name that is certificate subject."
+        echo -e "   --ca <string>           \e[30G Set the CA certificate, must be PEM format."
+        echo -e "   --cakey <string>        \e[30G Set the CA key, must be PEM format."
+        echo -e "   --newcert <string>      \e[30G Set the type of the certificate. There are many preset options,"
+        echo -e "                           \e[30G such as 'ca', 'admin', 'docker', 'etcd', 'flanneld', 'kubernetes',"
+        echo -e "                           \e[30G 'kube-controller-manager', 'kube-scheduler', 'kube-proxy'."
+        echo -e "                           \e[30G You can only choose one of them or custom."
+        echo -e "                           \e[30G If the certificate type is ca, you do not need to specify the '-ca' and '-cakey' options."
+        echo -e "   --profile               \e[30G Specify which signing profile to use. You can choose one of the following:"
+        echo -e "                           \e[30G - kubernetes or peer: with server and client authentication"
+        echo -e "                           \e[30G - server: with server authentication"
+        echo -e "                           \e[30G - client: with client authentication"
+        echo -e "   --certdir <string>      \e[30G The directory where the certificate is stored."
+        echo -e "                           \e[30G By default, the new CA certificate directory is 'certs/CA',"
+        echo -e "                           \e[30G the other certificate directory is 'cers/service'."
+        echo -e "   --days <int>            \e[30G The number of days a certificate generated by -x509 is valid for,"
+        echo -e "                           \e[30G defaults to '7300 days (20 years, 175200 hours)'"
+        echo -e "   --hosts                 \e[30G Host list for the certificate, could be a comma-separated list."
+        echo -e "   --subject               \e[30G Specify the subject of the certificate. A valid format is"
+        echo -e "                           \e[30G '/C=<country>/ST=<state>/L=<city>/O=<organization>/OU=<organization unit>/CN=<common name>'."
+        echo -e "   --force                 \e[30G Force CLI command to generate new certificates."
+        echo
+        exit 1
+    }
+
+    set -- $@ ; [ $# == 0 ] && gencert_usage
+    local OPTARGS
+
+    while test $# -gt 0 ; do
+        case "$1" in
+            -h|--help|help)
+                gencert_usage
+                ;;
+            -i)
+                shift ; interface=$1 ; __do_retrieve_invalid_args i $interface
+                ;;
+            --ca)
+                shift ; ca_cert=$1 ; __do_retrieve_invalid_args ca ${ca_cert}
+                ;;
+            --cakey)
+                shift ; ca_key=$1 ; __do_retrieve_invalid_args cakey ${ca_key}
+                ;;
+            --newcert)
+                shift ; newcert=$1 ; __do_retrieve_invalid_args newcert $newcert
+                ;;
+            --profile)
+                shift ; profile=$1 ; __do_retrieve_invalid_args profile $profile
+                ;;
+            --certdir)
+                shift ; certdir=$1 ; __do_retrieve_invalid_args certdir $certdir
+                ;;
+            --days)
+                shift ; days=$1 ; __do_retrieve_invalid_args days $days
+                ;;
+            --hosts)
+                shift ; hosts=$1 ; __do_retrieve_invalid_args hosts $hosts
+                ;;
+            --subject)
+                shift ; subject=$1 ; __do_retrieve_invalid_args subject $subject
+                ;;
+            --force)
+                force=true
+                ;;
+            *)
+                OPTARGS="$OPTARGS $1"
+                ;;
+        esac
+        shift
+    done
+
+    set -- $OPTARGS ; test $# -gt 0 && gencert_usage
+
+    ## Retrieve invalid MustBeSet args, include '-i' and '--newcert' options
+    __do_retrieve_invalid_mustbeset_args gencert global
+
+    ## certificate conf and extfile dir
+    certs_conf_dir=${tmp_dir}/conf
+    certs_extfile_dir=${tmp_dir}/extfile
+
+    ## certificate root and ca dir
+    certs_root_dir=${certdir:=${work_dir}/certs}
+    certs_ca_dir=${certs_root_dir}/CA
+
+    ## ------ generate TLS certificate ------
+
+    ## retrieve mustbeset args
+    if [ x"$newcert" != x"ca" ] && [ x"${ca_cert}" == x"" -o x"${ca_key}" == x"" ]; then
+        echo -e "\e[0;33;1mFatal:\e[0m need a CA certificate (provide --ca and --cakey options)"
+        exit 1
+    fi
+
+    ## declare and create certificate dir
+    certs_service_dir=${certs_root_dir}/service ; mkdir -p ${certs_conf_dir} ${certs_service_dir}
+
+    ## generate and transform ca-conf.json.j2, ca-csr.json.j2 and csr.json.j2 template
+    __do_openssl_gentmpl_cmd --type config &>/dev/null
+    __do_openssl_gentmpl_cmd --type csr &>/dev/null
+
+    cp -af ${certs_template_dir}/conf.json.j2 ${certs_conf_dir}/ca-conf.json
+    cp -af ${certs_template_dir}/csr.json.j2 ${certs_conf_dir}/ca-csr.json
+    sed -i '/^ \{1,\}"hosts":/ s@ "{{ alternative_name }}" @@' ${certs_conf_dir}/ca-csr.json
+
+    cp -af ${certs_template_dir}/csr.json.j2 ${certs_conf_dir}/csr.json
+    sed -i '/^ \{1,\}],$/ { N;N;N; { s/\(^ \{1,\}]\),\n \{1,\}"ca.*/\1/ } }' ${certs_conf_dir}/csr.json
+
+    ## X509v3 Subject
+    case "$newcert" in
+        ca)
+            mkdir -p ${certs_ca_dir}
+            certs_csr_conf=${certs_conf_dir}/ca-csr.json
+            certs_subject="${subject:=/C=CN/ST=GuangDong/L=ShenZhen/O=OpsDev/OU=System/CN=CA}"
+            certs_prefix_char=${certs_ca_dir}/ca
+            ;;
+        admin)
+            certs_csr_conf=${certs_conf_dir}/csr.json
+            certs_subject="${subject:=/C=CN/ST=GuangDong/L=ShenZhen/O=system:masters/OU=System/CN=admin}"
+            certs_prefix_char=${certs_root_dir}/service/admin
+            profile=client
+            ;;
+        docker)
+            certs_csr_conf=${certs_conf_dir}/csr.json
+            certs_subject="${subject:=/C=CN/ST=GuangDong/L=ShenZhen/O=docker/OU=System/CN=${hostname}}"
+            certs_prefix_char=${certs_root_dir}/service/docker
+            profile=server
+            ;;
+        etcd)
+            certs_csr_conf=${certs_conf_dir}/csr.json
+            certs_subject="${subject:=/C=CN/ST=GuangDong/L=ShenZhen/O=k8s/OU=System/CN=etcd}"
+            certs_prefix_char=${certs_root_dir}/service/etcd
+            profile=peer
+            ;;
+        flanneld)
+            certs_csr_conf=${certs_conf_dir}/csr.json
+            certs_subject="${subject:=/C=CN/ST=GuangDong/L=ShenZhen/O=k8s/OU=System/CN=flanneld}"
+            certs_prefix_char=${certs_root_dir}/service/flanneld
+            profile=client
+            ;;
+        kubernetes)
+            certs_csr_conf=${certs_conf_dir}/csr.json
+            certs_subject="${subject:=/C=CN/ST=GuangDong/L=ShenZhen/O=k8s/OU=System/CN=kubernetes}"
+            certs_prefix_char=${certs_root_dir}/service/kubernetes
+            profile=kubernetes
+            ;;
+        kube-controller-manager)
+            certs_csr_conf=${certs_conf_dir}/csr.json
+            certs_subject="${subject:=/C=CN/ST=GuangDong/L=ShenZhen/O=k8s/OU=System/CN=system:kube-controller-manager}"
+            certs_prefix_char=${certs_root_dir}/service/kube-controller-manager
+            profile=kubernetes
+            ;;
+        kube-scheduler)
+            certs_csr_conf=${certs_conf_dir}/csr.json
+            certs_subject="${subject:=/C=CN/ST=GuangDong/L=ShenZhen/O=k8s/OU=System/CN=system:kube-scheduler}"
+            certs_prefix_char=${certs_root_dir}/service/kube-scheduler
+            profile=kubernetes
+            ;;
+        kube-proxy)
+            certs_csr_conf=${certs_conf_dir}/csr.json
+            certs_subject="${subject:=/C=CN/ST=GuangDong/L=ShenZhen/O=k8s/OU=System/CN=system:kube-proxy}"
+            certs_prefix_char=${certs_root_dir}/service/kube-proxy
+            profile=client
+            ;;
+        *)
+            certs_csr_conf=${certs_conf_dir}/csr.json
+            certs_subject="${subject}"
+            certs_prefix_char=${certs_root_dir}/service/$newcert
+            ;;
+    esac
+
+    ## Retrieve invalid MustBeSet args, include '--profile' and '--subject' options
+    [ x"$newcert" != x"ca" ] && __do_retrieve_invalid_mustbeset_args gencert custom
+
+    ## declare cfssl gencert subcmd args array
+    unset gencert_cmd_args ; declare -a gencert_cmd_args
+
+    case $profile in
+        kubernetes|\
+        server|\
+        peer)
+            alternative_name="${hosts}"
+            __do_retrieve_invalid_mustbeset_args gencert hosts
+            gencert_cmd_args+=( -hostname "${alternative_name}" )
+            ;;
+        *)
+            unset alternative_name
+            ;;
+    esac
+
+    common_name=$(echo ${certs_subject} | grep -oP '(?<=/CN=)(.*)' || :) ; common_name=${common_name%%/*}
+    country=$(echo ${certs_subject} | grep -oP '(?<=/C=)(.*)(?=/ST)?' || :) ; country=${country%%/*}
+    state=$(echo ${certs_subject} | grep -oP '(?<=/ST=)(.*)(?=/L)?' || :) ; state=${state%%/*}
+    city=$(echo ${certs_subject} | grep -oP '(?<=/L=)(.*)(?=/O=)?' || :) ; city=${city%%/*}
+    organization=$(echo ${certs_subject} | grep -oP '(?<=/O=)(.*)(?=/OU=)?' || :) ; organization=${organization%%/*}
+    organization_unit=$(echo ${certs_subject} | grep -oP '(?<=/OU=)(.*)(?=/CN=)?' || :) ; organization_unit=${organization_unit%%/*}
+
+    ## ------ gencert certificate ------
+
+    ## transform CA config
+    sed -i "s@{{ certs_valid_hours }}@${certs_valid_hours}h@" ${certs_conf_dir}/ca-conf.json
+
+    ## transform CSR certificate template
+    sed -i "s@{{ common_name }}@${common_name}@
+            s@ \"{{ alternative_name }}\" @@
+            s@{{ country }}@$country@
+            s@{{ state }}@$state@
+            s@{{ city }}@$city@
+            s@{{ organization }}@$organization@
+            s@{{ organization_unit }}@${organization_unit}@
+           " ${certs_csr_conf}
+
+    case "$newcert" in
+        ca)
+            gencert_cmd_args=(
+                -initca ${certs_csr_conf}
+            )
+            ;;
+        admin|\
+        docker|\
+        etcd|flanneld|\
+        kubernetes|\
+        kube-controller-manager|\
+        kube-shcedule|\
+        kube-proxy|\
+        *)
+            gencert_cmd_args+=(
+                -ca ${ca_cert:=${certs_ca_dir}/ca.pem}
+                -ca-key ${ca_key:=${certs_ca_dir}/ca-key.pem}
+                -config ${certs_conf_dir}/ca-conf.json
+                -profile $profile
+            )
+            ;;
+    esac
+
+    ## retrieves whether a singed certificate exists,
+    ## specify the '--force' option to force CLI command to generate new certificates
+    [ -f "${certs_prefix_char}.pem" ] && certs_isExist="true" || certs_isExist="false"
+
+    if [ x"${force}" == x"true" ] ; then
+        ## generate key, csr and cert file
+        eval ${cfssl_cmd} gencert ${gencert_cmd_args[@]} ${certs_csr_conf} | \
+             ${cfssljosn_cmd} -bare ${certs_prefix_char}
+    else
+        ## Warning
+        [ x"${certs_isExist}" == x"true" ] && {
+            echo -ne "\e[0;33;1mWarning:\e[0m The certificate already exists. Continue ( yes / Default:no ): " ; read yesno
+        }
+
+        ## rewrite yesno when certs_isExist is set to false
+        [ x"${certs_isExist}" == x"false" ] && yesno=yes
+
+        [ x"${yesno}" == x"yes" ] && \
+            eval ${cfssl_cmd} gencert ${gencert_cmd_args[@]} ${certs_csr_conf} | \
+                 ${cfssljson_cmd} -bare ${certs_prefix_char}
+    fi
+
+    return 0
+}
+
+## certinfo subcmd
+__do_openssl_certinfo_cmd() {
+    certinfo_usage() {
+        echo "Usage: $cmd ${subcmd} [options]"
+        echo "       $cmd ${subcmd} -h|--help"
+        echo
+        echo "output certinfo about the given cert"
+        echo
+        echo -e "Options:"
+        echo -e "   --cert <string>         \e[30G The path of signed or CSR certificate, must be PEM format."
+        echo -e "   --raw                   \e[30G Using the openssl raw command to output the certificate in text form."
+        echo -e "                           \e[30G By default, use 'cfssl certinfo' to output JSON form."
+        echo
+        exit 1
+    }
+
+    set -- $@ ; [ $# == 0 ] && certinfo_usage
+    local OPTARGS
+
+    while test $# -gt 0 ; do
+        case "$1" in
+            -h|--help|help)
+                certinfo_usage
+                ;;
+            --cert)
+                shift ; cert_file=$1 ; __do_retrieve_invalid_args cert ${cert_file}
+                ;;
+            --raw)
+                raw=true
+                ;;
+            *)
+                OPTARGS="$OPTARGS $1"
+                ;;
+        esac
+        shift
+    done
+
+    set -- $OPTARGS ; test $# -gt 0 && certinfo_usage
+
+    if [ x"${raw}" == x"true" ] ; then
+        certinfo_cmd="openssl x509 -noout -text -in"
+    else
+        certinfo_cmd="${cfssl_cmd} certinfo -cert"
+    fi
+
+    ## retrieves whether the certificate exists, output certificate information
+    if [ ! -f "${cert_file}" ] ; then
+        echo -e "\e[0;33;1mFatal:\e[0m The certificate ( $cert_file ) is not exists."
+        exit 1
+    else
+        eval ${certinfo_cmd} ${cert_file}
+    fi
+
+    return 0
+}
+
+## Call subcommand
+__do_openssl_subcmd_exec() {
+    ## set subcmd and args
+    subcmd=${1//-/_} ; shift ; set -- $@
+
+    ## ------ 过滤命令参数列表 ------
+
+    local OPTARGS
+
+    while [ $# -gt 0 ] ; do
+        case "$1" in
+            -h|--help|help)
+                __do_openssl_${subcmd}_cmd $1
+                ;;
+            *)
+                OPTARGS="$OPTARGS $1"
+                ;;
+        esac
+        shift
+    done
+
+    set -- ${OPTARGS}
+
+    ## ------ 服务治理 ------
+
+    ## default env
+    : ${interface:=eth0}
+    : ${days:=7300} ; let certs_valid_hours=${days}*24
+
+    ipaddr=$(ifconfig $interface 2>/dev/null | sed -n '/.*inet \([0-9.]*\)[ \t]\{1,\}[(netmask|Bcast)].*/ s//\1/p')
+    hostname=$(hostname)
+
+    ## call subcmmmand
+    eval __do_openssl_${subcmd}_cmd $@
+
+    return 0
+}
+
+## Main function
+__main__() {
+    ## retrieve command options and args
+    set -- $@ ; [ $# == 0 ] && usage
+
+    while test $# -gt 0 ; do
+        case "$1" in
+            *)
+                OPTARGS="${OPTARGS} $1"
+                ;;
+        esac
+        shift
+    done
+
+    args_array=( ${OPTARGS} ) ; #echo ${args_array[@]} ; exit 1
+    set -- ${args_array[@]} ; #echo "$@" ; exit 1
+
+    case "$1" in
+        gentmpl|\
+        gencert|\
+        certinfo)
+            ## call subcommand
+            __do_openssl_subcmd_exec $@
+            ;;
+        -h|--help|help|*)
+            usage
+            ;;
+    esac
+}
+
+__main__ $@
+
+exit 0
