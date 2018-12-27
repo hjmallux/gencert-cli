@@ -1,0 +1,20 @@
+#!/bin/bash
+## --------------------------------------------------
+## Filename:        gitclean
+## Revision:        latest stable
+## Author:          Mallux
+## E-mail:          hj.mallux@gmail.com
+## Blog:            blog.mallux.me
+## Description:
+## --------------------------------------------------
+## Copyright © 2014-2019 Mallux
+
+rm -rf ./*.retry playbook/*.retry
+find ./ -type f -name ".DS_store" | xargs rm -rf
+
+git reflog expire --expire=now --all
+git gc --prune=now
+
+[ x"$1" == x"pull" ] && {
+    echo ; git reset --hard HEAD^ ; git pull
+}

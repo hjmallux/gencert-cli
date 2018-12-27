@@ -1,0 +1,6 @@
+## ignore itmes
+#.gitignore
+*.retry
+!*/.gitkeep
+templates/
+certs/
